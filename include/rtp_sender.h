@@ -22,10 +22,10 @@ typedef struct {
     uint16_t seq;           //每包都变
     uint32_t timestamp;     //每帧都变
     uint32_t ssrc;          //会话内固定，启动时随机
-} __attribute__((packed)) RTPHeader;
+} __attribute__((packed)) RTPHeader;        //RTP头部结构体
 
-int  rtp_init(const char *client_ip, int client_port);  //创建 UDP socket（向 VLC 发 RTP）
-void rtp_send_hello(void);                              //构造 RTP 头 + 发送数据
+int  rtp_init(const char *client_ip, int client_port);          //创建 UDP socket（向 VLC 发 RTP）
+void rtp_send_h264_file(const char *filename);                  //VLC发PLAY后调用，开始推流H.264文件
 void rtp_close(void);
 
 #endif /* RTP_SENDER_H */

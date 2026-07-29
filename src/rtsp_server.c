@@ -255,8 +255,9 @@ void rtsp_server_run(int server_fd)
                     printf("RTP 初始化失败,无法发送数据。\n\n");
                     continue;
                 }
-            
-                rtp_send_hello();
+
+                //发送h264数据
+                rtp_send_h264_file("/home/mayanping/workspace/EdgeRTSP/output.h264");
             }
             else if(strstr(buf, "TEARDOWN"))
             {
