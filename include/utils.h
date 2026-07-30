@@ -3,7 +3,7 @@
  *                  All rights reserved.
  *
  *       Filename:  utils.h
- *    Description:  
+ *    Description:  Utility functions for RTSP request parsing
  *                 
  *        Version:  1.0.0(2026/07/27)
  *         Author:  Mayanping <mayanping@email.com>
@@ -15,7 +15,6 @@
 #define UTILS_H
 
 int get_vlc_cseq(const char *req);
-
 int parse_client_ports(const char *req, int *rtp_port, int *rtcp_port);
 
 #endif /* UTILS_H */

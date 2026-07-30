@@ -3,7 +3,7 @@
  *                  All rights reserved.
  *
  *       Filename:  rtsp_server.c
- *    Description:  
+ *    Description:  Minimal RTSP server: handle OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN, callback-based stream source
  *                 
  *        Version:  1.0.0(2026/07/27)
  *         Author:  Mayanping <mayanping@email.com>
@@ -15,9 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>     //socket,bind,listen,accept
-#include <netinet/in.h>     //struct sockaddr_in
-#include <arpa/inet.h>      //inet_ntoa,htons
+#include <sys/socket.h>     // socket,bind,listen,accept
+#include <netinet/in.h>     // struct sockaddr_in
+#include <arpa/inet.h>      // inet_ntoa,htons
+#include <pthread.h>
 
 #include "rtsp_server.h"
 #include "rtp_sender.h"
@@ -25,9 +26,24 @@
 
 #define BUF_SIZE 4096
 
+static volatile int g_streaming = 0;        // 流状态信号灯：0停 1播
+static pthread_t g_stream_tid;              // 记录推流线程ID，用于 join
+static void *(*play_action)(void *) = NULL;    // 回调空位
 static int client_rtp_port = 0;
 static int client_rtcp_port = 0;
 static char client_ip[64] = {0};
+
+// 给外部注册回调
+void rtsp_set_play_action(void *(*action)(void *))
+{
+    play_action = action;
+}
+
+// 给 camera_loop 读状态
+int rtsp_is_streaming(void)
+{
+    return g_streaming;
+}
 
 static void send_options(int client_fd, int cseq)
 {
@@ -49,20 +65,20 @@ static void send_describe(int client_fd, int cseq)
 {
     //1.构造SDP字符串
     const char *sdp =
-        "v=0\r\n"                           //固定
-        "o=- 0 0 IN IP4 0.0.0.0\r\n"    //理想状态下服务器真实地址
-        "s=EdgeRTSP\r\n"                    //会话名，纯展示，随便写，不影响协议功能
-        "t=0 0\r\n"                         //固定
-        "a=control:*\r\n"               //会话级控制"*"表示"整个会话就是一个可控制的资源"
+        "v=0\r\n"                           // 固定
+        "o=- 0 0 IN IP4 0.0.0.0\r\n"    // 理想状态下服务器真实地址
+        "s=EdgeRTSP\r\n"                    // 会话名，纯展示，随便写，不影响协议功能
+        "t=0 0\r\n"                         // 固定
+        "a=control:*\r\n"               // 会话级控制"*"表示"整个会话就是一个可控制的资源"
         "a=range:npt=0-\r\n"
-        "m=video 0 RTP/AVP 96\r\n"      //媒体级（视频轨道）控制，真正端口在 SETUP 的 server_port 里协商
+        "m=video 0 RTP/AVP 96\r\n"      // 媒体级（视频轨道）控制，真正端口在 SETUP 的 server_port 里协商
         "c=IN IP4 0.0.0.0\r\n"
-        "a=rtpmap:96 H264/90000\r\n"        //H264/90000固定
-        "a=fmtp:96 packetization-mode=1;"   //packetization-mode=1固定
-        "sprop-parameter-sets="         //SPS/PPS 必须和实际推的 H264 码流一致（否则 VLC 解不出来）
+        "a=rtpmap:96 H264/90000\r\n"        // H264/90000固定
+        "a=fmtp:96 packetization-mode=1;"   // packetization-mode=1固定
+        "sprop-parameter-sets="         // SPS/PPS 必须和实际推的 H264 码流一致（否则 VLC 解不出来）
         "Z2QQKKwbGqCgPaEAAAMAAQAAAwA8jwiEag==,"
         "aO88sA==\r\n"
-        "a=control:track1\r\n";         //媒体级控制：这条轨道叫 track1
+        "a=control:track1\r\n";         // 媒体级控制：这条轨道叫 track1
 
     char response[2048];
     int response_len = snprintf(response, sizeof(response),
@@ -129,7 +145,7 @@ int rtsp_server_init(int port)
     struct sockaddr_in server_addr;
     int opt = 1;
     
-    //1.创建socket
+    // 1. 创建socket
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) 
     {
@@ -137,7 +153,7 @@ int rtsp_server_init(int port)
         return -1;
     }
 
-    //2.设置SO_REUSEADDR选项,防止程序退出后，端口被系统占用几分钟（TIME_WAIT 状态）
+    // 2. 设置SO_REUSEADDR选项,防止程序退出后，端口被系统占用几分钟（TIME_WAIT 状态）
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) 
     {
         perror("setsockopt 设置失败");
@@ -145,12 +161,12 @@ int rtsp_server_init(int port)
         return -1;
     }
 
-    //3.配置地址结构体
-    server_addr.sin_family = AF_INET;           //IPV4
-    server_addr.sin_port = htons(port);         //端口号转换为网络字节序
-    server_addr.sin_addr.s_addr = INADDR_ANY;   //监听所有网卡
+    // 3. 配置地址结构体
+    server_addr.sin_family = AF_INET;           // IPV4
+    server_addr.sin_port = htons(port);         // 端口号转换为网络字节序
+    server_addr.sin_addr.s_addr = INADDR_ANY;   // 监听所有网卡
 
-    //4.绑定socket到指定端口
+    // 4. 绑定socket到指定端口
     if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) <0) 
     {
         perror("bind 绑定失败");
@@ -158,7 +174,7 @@ int rtsp_server_init(int port)
         return -1;
     }
 
-    //5.监听端口
+    // 5. 监听端口
     if (listen(server_fd, 3) < 0)
     {
         perror("listen 监听失败");
@@ -180,10 +196,10 @@ void rtsp_server_run(int server_fd)
 
     printf("RTSP 服务器已就绪, 等待 VLC 连接...\n");
 
-    //无限循环等待客户端连接
+    // 无限循环等待客户端连接
     while (1)
     {
-        //1.阻塞等待客户端连接
+        // 1. 阻塞等待客户端连接
         //  accept 返回一个新的 socket，用于和客户端通信
         int client_fd;
         client_fd = accept(server_fd, (struct sockaddr *)&client_address, &client_len);
@@ -198,12 +214,12 @@ void rtsp_server_run(int server_fd)
         // 防御：strncpy 在源串超长时不补 \0，手动确保结尾
         client_ip[sizeof(client_ip) - 1] = '\0';
 
-        //2.连接成功，打印客户端IP和端口号
+        // 2. 连接成功，打印客户端IP和端口号
         printf("VLC已连接: \nIP=%s, 端口=%d\n\n",
                inet_ntoa(client_address.sin_addr),
                ntohs(client_address.sin_port));
 
-        //3..处理RTSP请求
+        // 3. 处理RTSP请求
         while(1)
         {
             memset(buf, 0, sizeof(buf));
@@ -214,10 +230,10 @@ void rtsp_server_run(int server_fd)
                 break;
             }
 
-            buf[read_len] = '\0';   //数据结束后的第一个位置写0，字符串结束标记
+            buf[read_len] = '\0';   // 数据结束后的第一个位置写0，字符串结束标记
             printf("收到 RTSP 请求:\n%s", buf);
 
-            //4.解析CSeq
+            // 4. 解析CSeq
             int cseq = get_vlc_cseq(buf);
             if (cseq < 0)
             {
@@ -225,7 +241,7 @@ void rtsp_server_run(int server_fd)
                 continue;
             }
 
-            //5.判断请求类型并处理
+            // 5. 判断请求类型并处理
             if(strstr(buf,"OPTIONS"))
             {
                 send_options(client_fd, cseq);
@@ -249,22 +265,36 @@ void rtsp_server_run(int server_fd)
             }
             else if(strstr(buf, "PLAY"))
             {
+                g_streaming = 1;   // 先亮绿灯
                 send_play(client_fd, cseq);
                 if (rtp_init(client_ip, client_rtp_port) < 0)
                 {
                     printf("RTP 初始化失败,无法发送数据。\n\n");
+                    g_streaming = 0;                 // 失败要灭灯，别留脏状态
                     continue;
                 }
 
-                //发送h264数据
-                rtp_send_h264_file("/home/mayanping/workspace/EdgeRTSP/output.h264");
+                if (play_action != NULL)
+                {
+                    // 摄像头模式：起线程跑 camera_loop（play_action 指向它）
+                    pthread_create(&g_stream_tid, NULL, play_action, NULL);
+                } else
+                {
+                    // 文件模式兜底：直接发文件（你原来的逻辑，暂不动）
+                    rtp_send_h264_file("/home/mayanping/workspace/EdgeRTSP/output.h264");
+                }
             }
             else if(strstr(buf, "TEARDOWN"))
             {
                 printf("VLC 请求断开连接...\n");
 
-                rtp_close();
-                break;  // 退出内层循环
+                g_streaming = 0;                      // ① 亮红灯，通知线程退出
+                if (play_action != NULL)              // ← 只有摄像头模式才 join
+                {
+                    pthread_join(g_stream_tid, NULL); // ② 等线程真正退出（跑完当前帧）
+                }
+                rtp_close();                          // ③ 确认无人用 socket 再关
+                break;                                // ④ 退内层循环
             }
             else
             {

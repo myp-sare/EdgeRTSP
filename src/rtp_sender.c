@@ -3,7 +3,7 @@
  *                  All rights reserved.
  *
  *       Filename:  rtp_sender.c
- *    Description:  
+ *    Description:  RTP packet sender: init UDP socket, pack NALU into RTP (Single/FU-A), send to VLC
  *                 
  *        Version:  1.0.0(2026/07/27)
  *         Author:  Mayanping <mayanping@email.com>
@@ -19,17 +19,16 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "rtp_sender.h"
-//#include <sys/stat.h>
 
 static int rtp_sockfd = -1;
-static struct sockaddr_in dest_addr;        //RTP 发送的目标地址（VLC 的 IP+端口）
+static struct sockaddr_in dest_addr;        // RTP 发送的目标地址（VLC 的 IP+端口）
 static uint16_t seq = 0;
 static uint32_t timestamp = 0;
 static uint32_t ssrc = 0x12345678;
 
-static uint8_t *h264_buffer = NULL;     //放当前整个H264文件
-static int h264_buffer_len = 0;         //文件总大小
-static int h264_pos = 0;                //当前读取位置
+static uint8_t *h264_buffer = NULL;     // 放当前整个H264文件
+static int h264_buffer_len = 0;         // 文件总大小
+static int h264_pos = 0;                // 当前读取位置
 
 /*初始化 RTP socket*/
 int rtp_init(const char *client_ip, int client_port)
@@ -42,13 +41,15 @@ int rtp_init(const char *client_ip, int client_port)
         return -1;
     }
 
-    //2.保存目标地址（VLC 的 IP 和 RTP 端口）
+    // 2. 保存目标地址（VLC 的 IP 和 RTP 端口）
     memset(&dest_addr, 0, sizeof(dest_addr));
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(client_port);
     dest_addr.sin_addr.s_addr = inet_addr(client_ip);
     
     printf("RTP 初始化成功，目标:\nIP= %s, 端口= %d\n", client_ip, client_port);
+    seq = 0;
+    timestamp = 0;
     return 0;
 }
 
@@ -186,18 +187,18 @@ static void rtp_send_packet(const uint8_t *payload, int payload_len, int mark_bi
         return;
     }
 
-    uint8_t packet[1500];                       //一块裸字节缓冲区（1500字节）
-    RTPHeader *header = (RTPHeader *)packet;    //把这块缓冲区内存"看成" RTPHeader
+    uint8_t packet[1500];                       // 一块裸字节缓冲区（1500字节）
+    RTPHeader *header = (RTPHeader *)packet;    // 把这块缓冲区内存"看成" RTPHeader
     header->vpxcc = 0x80;                       // V=2, P=0, X=0, CC=0
-    header->mpt = 0x60;                         // M=0, PT=96 (H264)
+    header->mpt = 0x60 | (mark_bit ? 0x80 : 0x00);
     header->seq = htons(seq++);
     header->timestamp = htonl(timestamp);
     header->ssrc = htonl(ssrc);
 
-    //2.复制发送数据
+    // 2. 复制发送数据
     memcpy(packet + 12, payload, payload_len);
 
-    //3.发送 UDP 包
+    // 3 .发送 UDP 包
     int total_size = 12 + payload_len;
     ssize_t sent = sendto(rtp_sockfd, packet, total_size, 0,
                           (struct sockaddr *)&dest_addr, sizeof(dest_addr));
@@ -211,8 +212,8 @@ static void rtp_send_packet(const uint8_t *payload, int payload_len, int mark_bi
            seq - 1, timestamp, total_size);
 }
 
-//大小NALU判断与大NALU分片，发送NALU
-static void rtp_send_nalu(const uint8_t *nalu_data, int nalu_len)
+// 大小NALU判断与大NALU分片，发送NALU
+void rtp_send_nalu(const uint8_t *nalu_data, int nalu_len)
 {
     if (nalu_data == NULL || nalu_len <= 0)
     {
@@ -237,7 +238,7 @@ static void rtp_send_nalu(const uint8_t *nalu_data, int nalu_len)
 
     while (remaining > 0)
     {
-        //如果还剩的数据比每片上限多，那这次就发满上限（1386）；否则，剩多少就发多少。
+        // 如果还剩的数据比每片上限多，那这次就发满上限（1386）；否则，剩多少就发多少。
         int chunk = (remaining > max_fu_payload) ? max_fu_payload : remaining;
         int is_last = (chunk == remaining);
 
@@ -249,7 +250,7 @@ static void rtp_send_nalu(const uint8_t *nalu_data, int nalu_len)
         header->timestamp = htonl(timestamp);
         header->ssrc = htonl(ssrc);
 
-        //FU Indicator：保留原始 F+NRI，Type 强制设 28 (FU-A)
+        // FU Indicator：保留原始 F+NRI，Type 强制设 28 (FU-A)
         fu_packet[12] = (nalu_data[0] & 0xE0) | 28;
 
         // FU Header：S/E 位 + 原始 Type
@@ -280,18 +281,18 @@ static void rtp_send_nalu(const uint8_t *nalu_data, int nalu_len)
 
 void rtp_send_h264_file(const char *filename)
 {
-    //1.加载文件
+    // 1. 加载文件
     if (load_h264_file(filename) < 0)
     {
         printf("文件加载失败，停止推流。\n");
         return;
     }
 
-    //2.重置序号和时间戳
-    seq = 0;        //发送的包的序号，每发送成功一个，sep++
-    timestamp = 0;  //每发送一帧+3000
+    // 2. 重置序号和时间戳
+    seq = 0;        // 发送的包的序号，每发送成功一个，sep++
+    timestamp = 0;  // 每发送一帧+3000
 
-    //3.循环发送
+    // 3. 循环发送
     uint8_t *nalu = NULL;
     int nalu_len = 0;
     int frame_count = 0;
@@ -303,7 +304,7 @@ void rtp_send_h264_file(const char *filename)
         uint8_t nal_type = nalu[0] & 0x1F;
         nalu_count++;
 
-        // 2.统计每种NALU的类型
+        // 2. 统计每种NALU的类型
         if (nal_type == 7) sps_count++;
         else if (nal_type == 8) pps_count++;
         else if (nal_type == 5) idr_count++;
@@ -316,12 +317,12 @@ void rtp_send_h264_file(const char *filename)
             printf("%d. type=%d, len=%d\n", nalu_count, nal_type, nalu_len);
         }
 
-        // 3.发送NALU
+        // 3. 发送NALU
         rtp_send_nalu(nalu, nalu_len);
 
         // 时间戳推进：每处理完一帧（slice 或 IDR）推进一次
         // 同一 NALU 的所有 FU-A 分片共享同一个 timestamp
-        if (nal_type == 1 || nal_type == 5)     //5是关键帧，1是P帧，这两种都是真正的图像数据
+        if (nal_type == 1 || nal_type == 5)     // 5是关键帧，1是P帧，这两种都是真正的图像数据
         {
             timestamp += 3000;   // 30fps: 90000/30 = 3000
             frame_count++;
