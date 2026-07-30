@@ -1,5 +1,5 @@
-# 轻量级 C 语言 RTSP 服务器 Demo
-一个基于 C 语言实现的轻量级 RTSP 服务器 Demo，支持 H264 裸流推送，可用于边缘计算设备的视频流传输。
+# 轻量级 C 语言 RTSP 服务器
+轻量级 C 语言 RTSP 服务器，支持 H264 裸流推送，已封装为静态库便于嵌入式集成
 
 ## 1. 编译项目
 ```bash
@@ -7,7 +7,7 @@ make        # 编译完整可执行文件 (RTSP Server Demo)
 make lib    # 仅编译静态库 librtpsender.a
 ```
 
-## 2. 运行 Demo
+## 2. 运行
 首先确保 Ubuntu 防火墙放行 8554 端口，在项目根目录执行：
 ```bash
 make run
