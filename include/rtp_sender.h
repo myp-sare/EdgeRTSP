@@ -31,7 +31,10 @@ void rtp_close(void);
 /* 发送接口（核心） */
 void rtp_send_nalu(const uint8_t *nalu_data, int nalu_len);
 
-/* 文件推流（demo用） */
+/* 文件推流 */
 void rtp_send_h264_file(const char *filename);
+
+/* 推进时间戳（每编码完一帧调用一次，30fps 步长 3000）*/
+void rtp_next_frame(void);
 
 #endif /* RTP_SENDER_H */

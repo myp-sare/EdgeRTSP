@@ -212,6 +212,12 @@ static void rtp_send_packet(const uint8_t *payload, int payload_len, int mark_bi
            seq - 1, timestamp, total_size);
 }
 
+// 供外部（摄像头实时推流）每帧调用，推进 RTP 时间戳
+void rtp_next_frame(void)
+{
+    timestamp += 3000;   // 90000 / 30fps = 3000
+}
+
 // 大小NALU判断与大NALU分片，发送NALU
 void rtp_send_nalu(const uint8_t *nalu_data, int nalu_len)
 {
@@ -324,7 +330,7 @@ void rtp_send_h264_file(const char *filename)
         // 同一 NALU 的所有 FU-A 分片共享同一个 timestamp
         if (nal_type == 1 || nal_type == 5)     // 5是关键帧，1是P帧，这两种都是真正的图像数据
         {
-            timestamp += 3000;   // 30fps: 90000/30 = 3000
+            rtp_next_frame();    // 30fps: 90000/30 = 3000
             frame_count++;
             usleep(33000);       // 约 30fps 节奏，避免瞬间发完 VLC 缓冲不来
         }
