@@ -52,7 +52,7 @@ static void send_options(int client_fd, int cseq)
     snprintf(response, sizeof(response),
              "RTSP/1.0 200 OK\r\n"
              "CSeq: %d\r\n"
-             "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n"
+             "Public: OPTIONS, DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN\r\n"
              "\r\n",
              cseq
     );
@@ -283,6 +283,16 @@ void rtsp_server_run(int server_fd)
                     // 文件模式兜底：直接发文件（你原来的逻辑，暂不动）
                     rtp_send_h264_file("/home/mayanping/workspace/EdgeRTSP/output.h264");
                 }
+            }
+            else if(strstr(buf, "PAUSE"))
+            {
+                printf("VLC 请求暂停播放...\n");
+                g_streaming = 0;   // 灭绿灯，亮红灯通知线程暂停
+                // 这里不 join 线程，camera_loop 里会自己停在 while 循环里
+                char response[128];
+                snprintf(response, sizeof(response),
+                        "RTSP/1.0 200 OK\r\nCSeq: %d\r\n\r\n", cseq);
+                send(client_fd, response, strlen(response), 0);
             }
             else if(strstr(buf, "TEARDOWN"))
             {
