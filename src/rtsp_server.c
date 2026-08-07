@@ -26,8 +26,57 @@
 
 #define BUF_SIZE 4096
 
-static volatile int g_streaming = 0;        // 流状态信号灯：0停 1播
-static pthread_t g_stream_tid;              // 记录推流线程ID，用于 join
+// ===== 动态SPS/PPS存储 =====
+static char g_sps_base64[128] = {0};
+static char g_pps_base64[128] = {0};
+static int g_sps_pps_ready = 0;
+static pthread_mutex_t g_sps_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// ===== Base64编码 =====
+static void base64_encode(const uint8_t *input, int len, char *output)
+{
+    const char *table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int i = 0, j = 0;
+    uint8_t a, b, c;
+    
+    while (i < len) {
+        a = input[i++];
+        b = (i < len) ? input[i++] : 0;
+        c = (i < len) ? input[i++] : 0;
+        
+        output[j++] = table[a >> 2];
+        output[j++] = table[((a & 0x03) << 4) | (b >> 4)];
+        output[j++] = (i - 2 < len) ? table[((b & 0x0f) << 2) | (c >> 6)] : '=';
+        output[j++] = (i - 1 < len) ? table[c & 0x3f] : '=';
+    }
+    output[j] = '\0';
+}
+
+// ===== 外部接口：设置SPS/PPS =====
+void rtsp_set_sps_pps(const uint8_t *sps, int sps_len, 
+                       const uint8_t *pps, int pps_len)
+{
+    pthread_mutex_lock(&g_sps_mutex);
+    
+    if (sps != NULL && sps_len > 0) {
+        memset(g_sps_base64, 0, sizeof(g_sps_base64));
+        base64_encode(sps, sps_len, g_sps_base64);
+    }
+    if (pps != NULL && pps_len > 0) {
+        memset(g_pps_base64, 0, sizeof(g_pps_base64));
+        base64_encode(pps, pps_len, g_pps_base64);
+    }
+    
+    if (strlen(g_sps_base64) > 0 && strlen(g_pps_base64) > 0) {
+        g_sps_pps_ready = 1;
+        printf("SPS/PPS 已完整就绪!\n");
+    }
+    
+    pthread_mutex_unlock(&g_sps_mutex);
+}
+
+static volatile int g_streaming = 0;           // 流状态信号灯：0停 1播
+static pthread_t g_stream_tid;                 // 记录推流线程ID，用于 join
 static void *(*play_action)(void *) = NULL;    // 回调空位
 static int client_rtp_port = 0;
 static int client_rtcp_port = 0;
@@ -63,24 +112,50 @@ static void send_options(int client_fd, int cseq)
 
 static void send_describe(int client_fd, int cseq)
 {
-    //1.构造SDP字符串
-    const char *sdp =
-        "v=0\r\n"                           // 固定
-        "o=- 0 0 IN IP4 0.0.0.0\r\n"    // 理想状态下服务器真实地址
-        "s=EdgeRTSP\r\n"                    // 会话名，纯展示，随便写，不影响协议功能
-        "t=0 0\r\n"                         // 固定
-        "a=control:*\r\n"               // 会话级控制"*"表示"整个会话就是一个可控制的资源"
+    char sps_pps[512];
+    char sdp[2048];
+    int wait_count = 0;
+    
+    // ===== 等待 SPS/PPS 就绪（最多等待2秒）=====
+    while (!g_sps_pps_ready && wait_count < 40)
+    {
+        usleep(50000);
+        wait_count++;
+    }
+    
+    pthread_mutex_lock(&g_sps_mutex);
+    
+    if (g_sps_pps_ready && strlen(g_sps_base64) > 0 && strlen(g_pps_base64) > 0)
+    {
+        snprintf(sps_pps, sizeof(sps_pps),
+                 "sprop-parameter-sets=%s,%s",
+                 g_sps_base64, g_pps_base64);
+        printf("使用动态SPS/PPS (等待%dms)\n", wait_count * 50);
+    } else
+    {
+        snprintf(sps_pps, sizeof(sps_pps),
+                 "sprop-parameter-sets=Z2QAKKzN2QFAFuaAQCAAAAMAAQAAAwA8h4UYAQ==,aO48sA==");
+        printf("SPS/PPS超时, 使用占位符\n");
+    }
+    
+    pthread_mutex_unlock(&g_sps_mutex);
+    
+    snprintf(sdp, sizeof(sdp),
+        "v=0\r\n"
+        "o=- 0 0 IN IP4 0.0.0.0\r\n"
+        "s=EdgeRTSP\r\n"
+        "t=0 0\r\n"
+        "a=control:*\r\n"
         "a=range:npt=0-\r\n"
-        "m=video 0 RTP/AVP 96\r\n"      // 媒体级（视频轨道）控制，真正端口在 SETUP 的 server_port 里协商
+        "m=video 0 RTP/AVP 96\r\n"
         "c=IN IP4 0.0.0.0\r\n"
-        "a=rtpmap:96 H264/90000\r\n"        // H264/90000固定
-        "a=fmtp:96 packetization-mode=1;"   // packetization-mode=1固定
-        "sprop-parameter-sets="         // SPS/PPS 必须和实际推的 H264 码流一致（否则 VLC 解不出来）
-        "Z2QQKKwbGqCgPaEAAAMAAQAAAwA8jwiEag==,"
-        "aO88sA==\r\n"
-        "a=control:track1\r\n";         // 媒体级控制：这条轨道叫 track1
+        "a=rtpmap:96 H264/90000\r\n"
+        "a=fmtp:96 packetization-mode=1;%s\r\n"
+        "a=control:track1\r\n",
+        sps_pps
+    );
 
-    char response[2048];
+    char response[4096];
     int response_len = snprintf(response, sizeof(response),
         "RTSP/1.0 200 OK\r\n"
         "CSeq: %d\r\n"
@@ -93,13 +168,8 @@ static void send_describe(int client_fd, int cseq)
         sdp
     );
 
-    if (response_len < 0 || response_len >= (int)sizeof(response)) {
-        printf("DESCRIBE 响应太长，无法发送。\n");
-        return;
-    }
-    
     send(client_fd, response, response_len, 0);
-    printf("已发送 DESCRIBE 响应： \nCSeq=%d, SDP 长度=%zu\n\n", cseq, strlen(sdp));
+    printf("已发送 DESCRIBE 响应 (SDP长度=%zu)\n", strlen(sdp));
 }
 
 static void send_setup(int client_fd, int cseq)

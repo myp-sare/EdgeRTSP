@@ -26,4 +26,8 @@ void rtsp_set_play_action(void *(*action)(void *));    // 册 PLAY 时要执行�
 /* 状态查询 */
 int rtsp_is_streaming(void);                        // 让外部（camera_loop）能读流状态
 
+/* 动态SPS/PPS设置（由编码器调用） */
+void rtsp_set_sps_pps(const uint8_t *sps, int sps_len, 
+                       const uint8_t *pps, int pps_len);
+                       
 #endif /* RTSP_SERVER_H */
