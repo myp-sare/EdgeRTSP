@@ -75,6 +75,12 @@ void rtsp_set_sps_pps(const uint8_t *sps, int sps_len,
     pthread_mutex_unlock(&g_sps_mutex);
 }
 
+// ===== 查询 SPS/PPS 是否已就绪 =====
+int rtsp_is_sps_pps_ready(void)
+{
+    return g_sps_pps_ready;
+}
+
 static volatile int g_streaming = 0;           // 流状态信号灯：0停 1播
 static pthread_t g_stream_tid;                 // 记录推流线程ID，用于 join
 static void *(*play_action)(void *) = NULL;    // 回调空位

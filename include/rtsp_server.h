@@ -30,4 +30,7 @@ int rtsp_is_streaming(void);                        // 让外部（camera_loop�
 void rtsp_set_sps_pps(const uint8_t *sps, int sps_len, 
                        const uint8_t *pps, int pps_len);
                        
+/* 查询 SPS/PPS 是否已就绪 */
+int rtsp_is_sps_pps_ready(void);
+
 #endif /* RTSP_SERVER_H */
